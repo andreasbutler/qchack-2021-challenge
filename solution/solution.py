@@ -85,11 +85,11 @@ def matrix_to_sycamore_operations(
         c.append(cirq.ControlledGate(cirq.T).on(qs[0], qs[1]))
         c.append(cirq.ControlledGate(cirq.Y**-0.5).on(qs[0], qs[1]))
         c.append(cirq.CCZ(qs[0], qs[1], qs[2]))
+        c.append(cirq.ControlledGate(cirq.Y ** -0.5).on(qs[0], qs[2]))
         c.append(cirq.ControlledGate(cirq.Y**0.5).on(qs[0], qs[1]))
-        c.append(cirq.ControlledGate(cirq.T ** -1).on(qs[0], qs[1]))
+        c.append(cirq.ControlledGate(cirq.Z ** -0.25).on(qs[0], qs[1]))
         c.append(cirq.ControlledGate(cirq.Y**0.5).on(qs[0], qs[1]))
         c.append(cirq.CX.on(qs[0], qs[1]))
-        c.append(cirq.ControlledGate(cirq.Y ** -0.5).on(qs[0], qs[2]))
         c.append(cirq.CCZ.on(qs[0], qs[1], qs[2]))
         c.append(cirq.ControlledGate(cirq.Y ** 0.5).on(qs[0], qs[2]))
         return c
@@ -99,8 +99,7 @@ def matrix_to_sycamore_operations(
             return True
         else:
             return False
-    
-    
+       
     def twoQ_sycamore_optimize(target_qubits, gate):
         g = gate.on(target_qubits[0], target_qubits[1])
         g = converter.convert(g)
@@ -146,11 +145,11 @@ def matrix_to_sycamore_operations(
         if np.isclose(matrix, cirq.unitary(cirq.ControlledGate(cirq.ISWAP ** 0.5))).all():
 #             g = cirq.ControlledGate(cirq.ISWAP ** 0.5).on(*target_qubits)
 #             g = cirq.decompose(g)
-#             c = cirq.Circuit(g)
-#             print(c)
-#             c = xmon_converter.convert(c)
-            c = controlled_sqrt_iswap(target_qubits)
-            return cirq.decompose(c), []
+#             c = controlled_sqrt_iswap(target_qubits)
+            g = cirq.ControlledGate(cirq.FSimGate(-np.pi/4, 0))
+            g = cirq.decompose(g.on(*target_qubits))
+            c = cirq.Circuit(g)
+            return cirq.decompose(c, keep=keep_func), []
         
         for threeQ_sycamore_unitary in threeQ_sycamore_unitaries:
             if np.isclose(matrix, threeQ_sycamore_unitary[0]).all():
@@ -244,28 +243,85 @@ def matrix_to_sycamore_operations(
         return c, [ancilla]
     
     
+    def is_adjacent(q1, q2):
+        return (q1.row == q2.row and np.abs(q1.col - q2.col) == 1) or (np.abs(q1.row - q2.row) == 1 and q1.col == q2.col)
+
+    def swap_path(qs, q1, q2):
+        path = []
+        if q1 == q2:
+            return path
+        q = q1
+        while not is_adjacent(q, q2):
+            if not q2.row - q.row == 0:
+                row_dir = int((q2.row - q.row)/np.abs(q2.row - q.row))
+                if cirq.GridQubit(q.row + row_dir, q.col) in qs:
+                    q = cirq.GridQubit(q.row + row_dir, q.col)
+                    path.append(q)
+                    continue
+            if not q2.col - q.col == 0:
+                col_dir = int((q2.col - q.col)/np.abs(q2.col - q.col))
+                q = cirq.GridQubit(q.row, q.col + col_dir)
+                path.append(q)
+        return path
+    
+    def two_q_sycamore(g, q1, q2, qs):
+        sp = swap_path(qs, q1, q2)
+        if len(sp) == 0:
+            yield g
+            return
+        q = q1
+        for i in range(len(sp)):
+            yield cirq.SWAP(q, sp[i])
+            q = sp[i]
+        yield g.gate(q, q2)
+        sp.reverse()
+        for i in range(1, len(sp)):
+            yield cirq.SWAP(q, sp[i])
+            q = sp[i]
+        yield cirq.SWAP(q, q1)
+    
+    
     for U in increment_unitaries:
         if U.shape == matrix.shape:
             if np.isclose(U, matrix).all():
-                c, a = increment(target_qubits)
-                return cirq.decompose(c), a
+                if len(target_qubits) >= 7:
+                        c, a = increment(target_qubits)
+                        c = cirq.decompose(c)
+                        # return c, a
+                        cn = cirq.Circuit()
+                        for g in c:
+                            if len(g.qubits)==1:
+                                cn.append(g)
+                            else:
+                                q1 = g.qubits[0]
+                                q2 = g.qubits[1]
+                                cn.append(cirq.Circuit(two_q_sycamore(g, q1, q2, target_qubits)))
+                        return converter.convert(cn), a
+                else:
+                    c, a = increment(target_qubits)
+                    c = cirq.decompose(c)
+                    return c, a
     
-            
     def isDiag(M):
         i, j = np.nonzero(M)
         return np.all(i == j)
     
     if isDiag(matrix):
+        print('bbbbbbbbb')
         if np.isclose(matrix.diagonal(), 1).all():
             return cirq.Circuit(), []
     
     if isDiag(matrix):
+        print('aaaaaaaa')
         diagonal = matrix.diagonal()
         diagangles = (-1j * np.log(diagonal)).real
 
         diag_gate = cirq.DiagonalGate(diagangles)
         gate = diag_gate(*target_qubits)._decompose_()[1:]
+        # gate = cirq.decompose(diag_gate.on(*target_qubits))
+        gate = converter.convert(gate)
         diag_circuit = cirq.Circuit(gate)
-        return diag_circuit, []
+        return diag_circuit, []        
+    
         
     return NotImplemented, []
