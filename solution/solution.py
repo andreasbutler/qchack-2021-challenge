@@ -445,14 +445,18 @@ def matrix_to_sycamore_operations(
     gates = arbitrary_operation_from_matrix(matrix, target_qubits)
     
     c = cirq.Circuit()
-    for g in gates:
-        if len(g.qubits)==1:
-            c.append(g)
-        elif len(g.qubits)==2:
-            q1 = g.qubits[0]
-            q2 = g.qubits[1]
-            c.append(cirq.Circuit(two_q_sycamore(g, q1, q2, target_qubits)))
-    return converter.convert(c), []
+    if len(target_qubits) < 8:
+        for g in gates:
+            if len(g.qubits)==1:
+                c.append(g)
+            elif len(g.qubits)==2:
+                q1 = g.qubits[0]
+                q2 = g.qubits[1]
+                c.append(cirq.Circuit(two_q_sycamore(g, q1, q2, target_qubits)))
+        return converter.convert(c), []
     
+    else:
+        c.append(gates)
+        return c, []
         
     return NotImplemented, []
