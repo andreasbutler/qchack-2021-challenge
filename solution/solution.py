@@ -2,6 +2,7 @@ from typing import List, Tuple
 
 import numpy as np
 import cirq
+import scipy
 
 
 def matrix_to_sycamore_operations(
@@ -62,7 +63,7 @@ def matrix_to_sycamore_operations(
     threeQ_sycamore_unitaries = [
         (cirq.unitary(cirq.CCX), cirq.CCX),
         (cirq.unitary(cirq.CSWAP), cirq.CSWAP),
-        (cirq.unitary(cirq.ControlledGate(cirq.ISWAP ** 0.5)), cirq.ControlledGate(cirq.ISWAP ** 0.5)),
+        # (cirq.unitary(cirq.ControlledGate(cirq.ISWAP ** 0.5)), cirq.ControlledGate(cirq.ISWAP ** 0.5)),
         (cirq.unitary(cirq.CCZ), cirq.CCZ),
         (cirq.unitary(cirq.IdentityGate(num_qubits=3)), cirq.IdentityGate(num_qubits=3))
     ]
@@ -142,15 +143,14 @@ def matrix_to_sycamore_operations(
                 return twoQ_xmon_optimize(target_qubits, twoQ_xmon_unitary[1])
         
     if matrix.shape[0] == 8:
-        if np.isclose(matrix, cirq.unitary(cirq.ControlledGate(cirq.ISWAP ** 0.5))).all():
-#             g = cirq.ControlledGate(cirq.ISWAP ** 0.5).on(*target_qubits)
-#             g = cirq.decompose(g)
-#             c = controlled_sqrt_iswap(target_qubits)
-            g = cirq.ControlledGate(cirq.FSimGate(-np.pi/4, 0))
-            g = cirq.decompose(g.on(*target_qubits))
-            c = cirq.Circuit(g)
-            return cirq.decompose(c, keep=keep_func), []
-        
+#         if np.isclose(matrix, cirq.unitary(cirq.ControlledGate(cirq.ISWAP ** 0.5))).all():
+# #             g = cirq.ControlledGate(cirq.ISWAP ** 0.5).on(*target_qubits)
+# #             g = cirq.decompose(g)
+# #             c = controlled_sqrt_iswap(target_qubits)
+#             g = cirq.FSimGate(-np.pi/4, 0)
+#             g = cirq.decompose(g.on(*target_qubits))
+#             c = cirq.Circuit(g)
+#             return cirq.decompose(c, keep=keep_func), []     
         for threeQ_sycamore_unitary in threeQ_sycamore_unitaries:
             if np.isclose(matrix, threeQ_sycamore_unitary[0]).all():
                 return threeQ_sycamore_optimize(target_qubits, threeQ_sycamore_unitary[1])
@@ -307,21 +307,152 @@ def matrix_to_sycamore_operations(
         return np.all(i == j)
     
     if isDiag(matrix):
-        print('bbbbbbbbb')
         if np.isclose(matrix.diagonal(), 1).all():
             return cirq.Circuit(), []
     
     if isDiag(matrix):
-        print('aaaaaaaa')
         diagonal = matrix.diagonal()
         diagangles = (-1j * np.log(diagonal)).real
 
         diag_gate = cirq.DiagonalGate(diagangles)
         gate = diag_gate(*target_qubits)._decompose_()[1:]
-        # gate = cirq.decompose(diag_gate.on(*target_qubits))
         gate = converter.convert(gate)
         diag_circuit = cirq.Circuit(gate)
-        return diag_circuit, []        
+        return diag_circuit, []
+    
+    def pulverize_matrix(m):
+        # N = 2^n
+        N = len(m)
+
+        L, CS, R = scipy.linalg.cossin(m, p=N / 2, q=N / 2)
+
+        if len(m) == 2:
+            stacked_matrices = np.stack([L, CS, R])
+            return stacked_matrices
+
+        # BREAK DOWN L MATRIX
+        L1 = L[:round(N / 2), :round(N / 2)]
+        L2 = L[round(N / 2):, round(N / 2):]
+
+        L1_decomp = pulverize_matrix(L1)
+        L2_decomp = pulverize_matrix(L2)
+
+        left_matrices = 1j * np.zeros([L1_decomp.shape[0], L1_decomp.shape[1] * 2, L1_decomp.shape[2] * 2])
+        left_matrices[:, :round(N / 2), :round(N / 2)] += L1_decomp
+        left_matrices[:, round(N / 2):, round(N / 2):] += L2_decomp
+
+        # BREAK DOWN R MATRIX
+        R1 = R[:round(N / 2), :round(N / 2)]
+        R2 = R[round(N / 2):, round(N / 2):]
+
+        R1_decomp = pulverize_matrix(R1)
+        R2_decomp = pulverize_matrix(R2)
+
+        right_matrices = 1j * np.zeros([R1_decomp.shape[0], R1_decomp.shape[1] * 2, R1_decomp.shape[2] * 2])
+        right_matrices[:, :round(N / 2), :round(N / 2)] += R1_decomp
+        right_matrices[:, round(N / 2):, round(N / 2):] += R2_decomp
+
+        all_matrices = np.concatenate([left_matrices, CS[None], right_matrices])
+        return all_matrices
+
+
+    def get_S_matrix(m):
+        S = np.zeros([round(2 ** int(m)), round(2 ** int(m))]) + 1
+
+        cols = [np.sign(np.cos(2 ** (m - 1 - i) * np.pi * np.arange(0, 2 ** int(m), 1) / 2 ** int(m) + 10 ** -6)) for i in range(int(m))]
+
+        for bit in range(len(cols)):
+            for i in range(len(S)):
+                if round(2 ** bit) & i:
+                    S[:, i] *= cols[bit]
+
+        return S
+
+
+    def gray_code_changes(m):
+        return gray_code_changes_r(m) + [m]
+
+
+    def gray_code_changes_r(m):
+        if m < 0:
+            return []
+        return gray_code_changes_r(m - 1) + [m] + gray_code_changes_r(m - 1)
+
+
+    def UCRy(ctrls, target, alphas, S_T_inv, seq):
+
+        thetas = np.matmul(S_T_inv, alphas)
+
+        gates = []
+        for i in range(len(seq)):
+            theta_i = thetas[i]
+            q_i = ctrls[int(seq[i])]
+            gates += [cirq.Ry(rads=theta_i)(target)]
+            gates += [cirq.CNOT(q_i, target)]
+
+        return gates
+
+    def ry_angle(u):
+        u_log = 1j*scipy.linalg.logm(u)
+        return((2j*u_log[0][1]).real)
+
+    def extract_ry_angles(matrix, target_bit, n):
+        alphas = []
+        for i in range(len(matrix)):
+            if not int(2**(n - 1 - target_bit))&i:
+                ry_gate = matrix[(i, i + int(2**(n - 1 - target_bit))),:][:,(i, i + int(2**(n - 1 - target_bit)))]
+                alphas += [ry_angle(ry_gate)]
+        alphas = np.array(alphas)
+        return alphas
+
+    def UCRy_gates_from_matrix(matrix, target_bit, qs, n, S_T_inv):
+        alphas = extract_ry_angles(matrix, target_bit, n)
+        ctrl_qs = qs[0:int(target_bit)] + qs[int(target_bit)+1:]
+        gates = UCRy(ctrl_qs[::-1], qs[int(target_bit)], alphas, S_T_inv, gray_code_changes(n-2))
+        return gates
+
+    def arbitrary_diagonal_gate_from_matrix(matrix, qs):
+        diagonal = matrix.diagonal()
+        diagangles = (-1j * np.log(diagonal)).real
+        diag_gate = cirq.DiagonalGate(diagangles)
+        gates = diag_gate(*qs)._decompose_()[0:]
+        return(gates)
+
+
+    def arbitrary_operation_from_matrix(U, qs):
+        n = round(np.log2(len(U)))
+        S = get_S_matrix(n - 1)
+        S_T_inv = np.linalg.inv(S.transpose())
+
+        matrices = pulverize_matrix(U)
+        ucry_target_bits = [n - 1 - i for i in gray_code_changes(n - 1)[:-1]]
+
+        gates = []
+
+        for m_i in range(len(matrices)):
+            # print(m_i, "/", len(matrices))
+            if m_i % 2 == 0:
+                gates = arbitrary_diagonal_gate_from_matrix(matrices[m_i], qs) + gates
+                # print(np.sum(np.abs(cirq.unitary(cirq.Circuit(arbitrary_diagonal_gate_from_matrix(matrices[m_i], qs))) - matrices[m_i])))
+                # print(matrices[m_i])
+            else:
+                target_bit = ucry_target_bits[int(m_i / 2)]
+                gates = UCRy_gates_from_matrix(matrices[m_i], target_bit, qs, n, S_T_inv) + gates
+                # print(np.sum(np.abs(cirq.unitary(cirq.Circuit(UCRy_gates_from_matrix(matrices[m_i], target_bit, qs, n, S_T_inv))) - matrices[m_i])))
+
+        return gates
+    
+    gates = arbitrary_operation_from_matrix(matrix, target_qubits)
+    
+    c = cirq.Circuit()
+    for g in gates:
+        if len(g.qubits)==1:
+            c.append(g)
+        elif len(g.qubits)==2:
+            q1 = g.qubits[0]
+            q2 = g.qubits[1]
+            c.append(cirq.Circuit(two_q_sycamore(g, q1, q2, target_qubits)))
+    return converter.convert(c), []
     
         
     return NotImplemented, []
