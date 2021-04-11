@@ -178,3 +178,4 @@ def _score_and_log(
     finally:
         judge_log.entries.append(result)
         print(result)
+        
